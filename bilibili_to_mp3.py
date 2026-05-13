@@ -665,8 +665,24 @@ class Application(tk.Tk):
         self._load_config()
         self._check_environment()
 
+    def _open_metadata_editor(self):
+        """打开 MP3 元数据编辑器"""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        editor_path = os.path.join(script_dir, "mp3_metadata_editor.py")
+
+        if not os.path.exists(editor_path):
+            messagebox.showerror("错误", f"未找到 MP3 元数据编辑器: {editor_path}")
+            return
+
+        try:
+            subprocess.Popen(
+                [sys.executable, editor_path],
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+        except Exception as e:
+            messagebox.showerror("错误", f"启动失败: {e}")
+
     def _check_environment(self):
-        """检查运行环境"""
         # 检查 BBDown
         script_dir = os.path.dirname(os.path.abspath(__file__))
         bbdown_path = os.path.join(script_dir, "BBDown.exe")
@@ -705,6 +721,7 @@ class Application(tk.Tk):
         title_frame = ttk.Frame(self)
         title_frame.pack(fill=tk.X, padx=15, pady=(10, 5))
         ttk.Label(title_frame, text="🎵 B站视频下载转MP3工具", style="Title.TLabel").pack(side=tk.LEFT)
+        ttk.Button(title_frame, text="🎵 MP3编辑器", command=self._open_metadata_editor).pack(side=tk.RIGHT, padx=(5, 0))
 
         # ── 输出目录选择 ──
         dir_frame = ttk.Frame(self)
