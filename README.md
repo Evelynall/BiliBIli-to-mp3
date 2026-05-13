@@ -1,6 +1,7 @@
 # B站视频下载转MP3工具
 
 一款简洁高效的 B站视频下载与音频转换工具，支持批量下载、视频封面提取、MP3元数据自定义写入。
+声明：此程序由AI生成
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-AGPL--3.0-orange.svg)
