@@ -1,0 +1,38 @@
+{
+  "output_dir": "C:\\Tools\\Elements\\Evelynall\\BiliBili-to-mp3\\download",
+  "keyword_matches": [
+    {
+      "keyword": "贝拉",
+      "artist": "贝拉Bella"
+    },
+    {
+      "keyword": "嘉然",
+      "artist": "嘉然Diana"
+    },
+    {
+      "keyword": "乃琳",
+      "artist": "乃琳Eileen"
+    },
+    {
+      "keyword": "心宜",
+      "artist": "心宜Fiona"
+    },
+    {
+      "keyword": "思诺",
+      "artist": "思诺Gladys"
+    },
+    {
+      "keyword": "嘉贝",
+      "artist": "嘉然Diana ; 贝拉Bella"
+    },
+    {
+      "keyword": "ASOUL",
+      "artist": "贝拉Bella ; 嘉然Diana ; 乃琳Eileen"
+    },
+    {
+      "keyword": "A-SOUL",
+      "artist": "贝拉Bella ; 嘉然Diana ; 乃琳Eileen"
+    }
+  ],
+  "auto_extract_booktitle": true
+}
