@@ -101,4 +101,3 @@ goto end
 exit /b 0
 
 :end
-pause

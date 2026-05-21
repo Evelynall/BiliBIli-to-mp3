@@ -8,12 +8,15 @@ MP3元数据编辑器
 
 import os
 import sys
+import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
+import requests
 
 REQUIRED_MODULES = {
     "mutagen": "mutagen",
+    "requests": "requests",
 }
 
 missing = []
@@ -40,8 +43,8 @@ class MP3MetadataEditor(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("MP3元数据编辑器")
-        self.geometry("900x700")
-        self.minsize(800, 600)
+        self.geometry("900x850")
+        self.minsize(800, 750)
 
         self.style = ttk.Style(self)
         self.style.theme_use("clam")
@@ -68,8 +71,44 @@ class MP3MetadataEditor(tk.Tk):
         self.current_cover_path = None
         self.current_lrc_path = None
         self.output_dir = None
-
+        self.artist_mapping = {}
+        self.config_file = os.path.join(os.path.dirname(__file__), 'config.json')
+        
+        self._load_config()
         self._build_ui()
+
+    def _load_config(self):
+        """加载配置文件"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    if 'artist_mapping' in config:
+                        self.artist_mapping = config['artist_mapping']
+                    else:
+                        self.artist_mapping = {}
+            else:
+                self.artist_mapping = {}
+        except Exception as e:
+            self.artist_mapping = {}
+            print(f"加载配置失败: {e}")
+
+    def _save_config(self):
+        """保存配置文件"""
+        try:
+            config = {}
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            
+            config['artist_mapping'] = self.artist_mapping
+            
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            
+            self._log("配置已保存")
+        except Exception as e:
+            self._log(f"保存配置失败: {e}")
 
     def _build_ui(self):
         title_frame = ttk.Frame(self)
@@ -90,6 +129,9 @@ class MP3MetadataEditor(tk.Tk):
                    command=self._import_cover_folder).pack(side=tk.LEFT, padx=2)
         ttk.Button(import_btn_frame, text="📝 导入歌词文件夹",
                    command=self._import_lrc_folder).pack(side=tk.LEFT, padx=2)
+        ttk.Button(import_btn_frame, text="🔍 自动匹配歌词",
+                   command=self._auto_match_lyrics,
+                   style="Accent.TButton").pack(side=tk.LEFT, padx=2)
 
         self.path_label = ttk.Label(import_frame, text="请先导入音乐文件夹",
                                     style="Status.TLabel")
@@ -101,20 +143,22 @@ class MP3MetadataEditor(tk.Tk):
         tree_container = ttk.Frame(file_list_frame)
         tree_container.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("filename", "has_cover", "has_lyrics", "matched_cover", "matched_lrc")
+        columns = ("filename", "artist", "has_cover", "has_lyrics", "matched_cover", "matched_lrc")
         self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="extended")
 
         self.tree.heading("filename", text="文件名")
+        self.tree.heading("artist", text="艺术家")
         self.tree.heading("has_cover", text="已有封面")
         self.tree.heading("has_lyrics", text="已有歌词")
         self.tree.heading("matched_cover", text="匹配的封面")
         self.tree.heading("matched_lrc", text="匹配的歌词")
 
-        self.tree.column("filename", width=300, minwidth=150)
+        self.tree.column("filename", width=250, minwidth=150)
+        self.tree.column("artist", width=120, minwidth=80)
         self.tree.column("has_cover", width=80, minwidth=60, anchor=tk.CENTER)
         self.tree.column("has_lyrics", width=80, minwidth=60, anchor=tk.CENTER)
-        self.tree.column("matched_cover", width=150, minwidth=80)
-        self.tree.column("matched_lrc", width=150, minwidth=80)
+        self.tree.column("matched_cover", width=120, minwidth=80)
+        self.tree.column("matched_lrc", width=120, minwidth=80)
 
         scrollbar_y = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.tree.yview)
         scrollbar_x = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=self.tree.xview)
@@ -138,7 +182,21 @@ class MP3MetadataEditor(tk.Tk):
                                        style="Status.TLabel")
         self.status_label.pack(side=tk.RIGHT, padx=10)
 
-        action_frame = ttk.LabelFrame(self, text=" 操作 ", padding=10)
+        # 文件名处理区域
+        filename_frame = ttk.LabelFrame(self, text=" 文件名处理 ", padding=10)
+        filename_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        filename_btn_frame = ttk.Frame(filename_frame)
+        filename_btn_frame.pack(fill=tk.X)
+        ttk.Button(filename_btn_frame, text="⚙️ 管理艺术家映射",
+                   command=self._open_mapping_manager).pack(side=tk.LEFT, padx=2)
+        self.rename_btn = ttk.Button(filename_btn_frame, text="📝 重命名文件（添加艺术家）",
+                                      style="Accent.TButton",
+                                      command=self._rename_files_with_artist)
+        self.rename_btn.pack(side=tk.LEFT, padx=2)
+
+        # 原有的操作区域
+        action_frame = ttk.LabelFrame(self, text=" 元数据操作 ", padding=10)
         action_frame.pack(fill=tk.X, padx=15, pady=5)
 
         action_btn_frame = ttk.Frame(action_frame)
@@ -187,7 +245,8 @@ class MP3MetadataEditor(tk.Tk):
         for file in Path(folder).iterdir():
             if file.suffix.lower() in ['.mp3']:
                 self.mp3_files.append(str(file))
-                self.tree.insert("", tk.END, values=(file.name, "未知", "未知", "", ""))
+                artist = self._get_artist_from_metadata(str(file)) or "未知"
+                self.tree.insert("", tk.END, values=(file.name, artist, "未知", "未知", "", ""))
 
         self.path_label.config(text=f"音乐目录: {folder}")
         self.status_label.config(text=f"共 {len(self.mp3_files)} 个文件")
@@ -206,7 +265,8 @@ class MP3MetadataEditor(tk.Tk):
             if file not in self.mp3_files:
                 self.mp3_files.append(file)
                 file_path = Path(file)
-                self.tree.insert("", tk.END, values=(file_path.name, "未知", "未知", "", ""))
+                artist = self._get_artist_from_metadata(file) or "未知"
+                self.tree.insert("", tk.END, values=(file_path.name, artist, "未知", "未知", "", ""))
 
         self.status_label.config(text=f"共 {len(self.mp3_files)} 个文件")
         self._log(f"添加了 {len(files)} 个音乐文件")
@@ -290,14 +350,14 @@ class MP3MetadataEditor(tk.Tk):
 
                 has_cover, has_lyrics, lyrics_type = self._check_mp3_metadata(mp3_file)
 
-                values[1] = "✓" if has_cover else "✗"
-                values[2] = lyrics_type if has_lyrics else "✗"
+                values[2] = "✓" if has_cover else "✗"
+                values[3] = lyrics_type if has_lyrics else "✗"
 
                 matched_cover = self._find_matching_file(base_name, cover_dir, cover_extensions)
                 matched_lrc = self._find_matching_file(base_name, lrc_dir, lrc_extensions)
 
-                values[3] = matched_cover if matched_cover else ""
-                values[4] = matched_lrc if matched_lrc else ""
+                values[4] = matched_cover if matched_cover else ""
+                values[5] = matched_lrc if matched_lrc else ""
 
                 self.tree.item(item, values=values)
 
@@ -343,8 +403,8 @@ class MP3MetadataEditor(tk.Tk):
             values = list(self.tree.item(item, "values"))
 
             try:
-                matched_cover = values[3]
-                matched_lrc = values[4]
+                matched_cover = values[4]
+                matched_lrc = values[5]
 
                 if not matched_cover and not matched_lrc:
                     self._log(f"跳过（无匹配文件）: {base_name}")
@@ -539,6 +599,414 @@ class MP3MetadataEditor(tk.Tk):
         text = text.replace("', '", '\n').replace('", "', '\n')
         
         return text.strip()
+
+    def _open_mapping_manager(self):
+        """打开艺术家映射管理对话框"""
+        MappingManagerDialog(self)
+
+    def _rename_files_with_artist(self):
+        """重命名文件，将艺术家添加到文件名末尾"""
+        items = self.tree.selection()
+        if not items:
+            if messagebox.askyesno("提示", "未选择文件，是否处理所有文件？"):
+                items = self.tree.get_children()
+            else:
+                return
+        
+        if not items:
+            messagebox.showinfo("提示", "没有可处理的文件")
+            return
+        
+        success_count = 0
+        fail_count = 0
+        skip_count = 0
+        
+        for item in items:
+            idx = self.tree.index(item)
+            if idx >= len(self.mp3_files):
+                continue
+            
+            mp3_path = self.mp3_files[idx]
+            path = Path(mp3_path)
+            
+            try:
+                artist = self._get_artist_from_metadata(mp3_path)
+                if not artist:
+                    self._log(f"跳过（未找到艺术家）: {path.name}")
+                    skip_count += 1
+                    continue
+                
+                artist = self._apply_artist_mapping(artist)
+                
+                new_path = self._generate_new_filename(mp3_path, artist)
+                if not new_path:
+                    skip_count += 1
+                    continue
+                
+                if new_path.exists():
+                    self._log(f"跳过（文件已存在）: {new_path.name}")
+                    skip_count += 1
+                    continue
+                
+                path.rename(new_path)
+                self.mp3_files[idx] = str(new_path)
+                
+                values = list(self.tree.item(item, "values"))
+                values[0] = new_path.name
+                self.tree.item(item, values=values)
+                
+                self._log(f"✓ 重命名: {path.name} → {new_path.name}")
+                success_count += 1
+                
+            except Exception as e:
+                self._log(f"✗ 重命名失败 {path.name}: {e}")
+                fail_count += 1
+        
+        self.progress_var.set(f"完成! 成功: {success_count}, 跳过: {skip_count}, 失败: {fail_count}")
+        self._log(f"\n重命名完成: 成功 {success_count}, 跳过 {skip_count}, 失败 {fail_count}")
+
+    def _get_artist_from_metadata(self, mp3_path):
+        """从MP3文件读取艺术家信息"""
+        try:
+            tags = ID3(mp3_path)
+            # 尝试多种艺术家标签
+            if 'TPE1' in tags:  # 主要艺术家
+                return str(tags['TPE1'])
+            elif 'TPE2' in tags:  # 专辑艺术家
+                return str(tags['TPE2'])
+            elif 'TCOM' in tags:  # 作曲家
+                return str(tags['TCOM'])
+        except ID3NoHeaderError:
+            pass
+        except Exception as e:
+            self._log(f"读取艺术家失败 {mp3_path}: {e}")
+        return None
+
+    def _apply_artist_mapping(self, artist_name):
+        """应用艺术家名字映射"""
+        if not artist_name:
+            return artist_name
+        return self.artist_mapping.get(artist_name, artist_name)
+
+    def _extract_song_name(self, filename):
+        """从文件名中提取歌曲名（取"-"前面的部分）"""
+        stem = Path(filename).stem
+        if "-" in stem:
+            return stem.split("-")[0].strip()
+        return stem.strip()
+    
+    def _search_lyrics_from_netease(self, song_name):
+        """通过网易云音乐 API 搜索歌词"""
+        try:
+            # 第一步：搜索歌曲
+            search_url = "https://music.163.com/api/search/get/web"
+            params = {
+                "s": song_name,
+                "type": 1,
+                "offset": 0,
+                "limit": 5
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            response = requests.get(search_url, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("code") == 200 and data.get("result", {}).get("songs"):
+                song_id = data["result"]["songs"][0]["id"]
+                
+                # 第二步：获取歌词
+                lyric_url = f"https://music.163.com/api/song/media?id={song_id}"
+                response = requests.get(lyric_url, headers=headers, timeout=15)
+                response.raise_for_status()
+                lyric_data = response.json()
+                
+                if lyric_data.get("code") == 200 and lyric_data.get("lyric"):
+                    return lyric_data["lyric"]
+            return None
+        except Exception as e:
+            self._log(f"网易云音乐歌词获取失败 {song_name}: {e}")
+            return None
+    
+    def _search_lyrics_from_gecimi(self, song_name):
+        """通过 gecimi API 搜索歌词"""
+        try:
+            # 尝试使用 HTTPS 协议
+            url = f"https://gecimi.com/api/lyric/{requests.utils.quote(song_name)}"
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("code") == 0 and data.get("count", 0) > 0:
+                # 返回第一个匹配结果的歌词 URL
+                lrc_url = data["result"][0]["lrc"]
+                # 确保歌词 URL 也使用 HTTPS
+                if lrc_url.startswith("http://"):
+                    lrc_url = "https://" + lrc_url[7:]
+                return lrc_url
+            return None
+        except requests.exceptions.RequestException as e:
+            self._log(f"gecimi API 搜索歌词失败 {song_name}: {e}")
+            return None
+        except Exception as e:
+            self._log(f"gecimi API 搜索歌词出错 {song_name}: {e}")
+            return None
+    
+    def _download_lyrics(self, lrc_url_or_content, save_path, is_content=False):
+        """下载歌词文件或直接保存内容"""
+        try:
+            if is_content:
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    f.write(lrc_url_or_content)
+                return True
+            else:
+                response = requests.get(lrc_url_or_content, timeout=15)
+                response.raise_for_status()
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    f.write(response.text)
+                return True
+        except requests.exceptions.RequestException as e:
+            self._log(f"下载歌词失败: {e}")
+            return False
+        except Exception as e:
+            self._log(f"保存歌词失败: {e}")
+            return False
+    
+    def _auto_match_lyrics(self):
+        """自动匹配并下载歌词"""
+        if not self.mp3_files:
+            messagebox.showwarning("警告", "请先导入音乐文件")
+            return
+        
+        # 如果没有设置歌词目录，使用当前脚本所在目录下的歌词文件夹
+        lrc_dir = getattr(self, 'lrc_dir', None)
+        if not lrc_dir:
+            lrc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '歌词')
+            if not os.path.exists(lrc_dir):
+                os.makedirs(lrc_dir)
+            self.lrc_dir = lrc_dir
+            self._log(f"歌词目录已设置为: {lrc_dir}")
+        
+        items = self.tree.selection()
+        if not items:
+            if messagebox.askyesno("提示", "未选择文件，是否处理所有文件？"):
+                items = self.tree.get_children()
+            else:
+                return
+        
+        if not items:
+            messagebox.showinfo("提示", "没有可处理的文件")
+            return
+        
+        success_count = 0
+        fail_count = 0
+        skip_count = 0
+        
+        for item in items:
+            idx = self.tree.index(item)
+            if idx >= len(self.mp3_files):
+                continue
+            
+            mp3_path = self.mp3_files[idx]
+            base_name = self._get_base_name(mp3_path)
+            song_name = self._extract_song_name(mp3_path)
+            
+            # 检查是否已存在歌词文件
+            lrc_path = os.path.join(lrc_dir, base_name + ".lrc")
+            if os.path.exists(lrc_path):
+                self._log(f"跳过（歌词已存在）: {base_name}")
+                skip_count += 1
+                continue
+            
+            self._log(f"搜索歌词: {song_name}")
+            
+            # 首先尝试 gecimi API
+            lrc_url = self._search_lyrics_from_gecimi(song_name)
+            if lrc_url:
+                if self._download_lyrics(lrc_url, lrc_path):
+                    self._log(f"  ✓ 歌词已保存(gecimi): {base_name}.lrc")
+                    success_count += 1
+                    # 更新树视图
+                    values = list(self.tree.item(item, "values"))
+                    values[5] = f"{base_name}.lrc"
+                    self.tree.item(item, values=values)
+                    continue
+            
+            # gecimi 失败，尝试网易云音乐
+            self._log(f"  gecimi 失败，尝试网易云音乐...")
+            lyric_content = self._search_lyrics_from_netease(song_name)
+            if lyric_content:
+                if self._download_lyrics(lyric_content, lrc_path, is_content=True):
+                    self._log(f"  ✓ 歌词已保存(网易云): {base_name}.lrc")
+                    success_count += 1
+                    # 更新树视图
+                    values = list(self.tree.item(item, "values"))
+                    values[5] = f"{base_name}.lrc"
+                    self.tree.item(item, values=values)
+                    continue
+            
+            # 都失败了
+            self._log(f"  ✗ 未找到歌词")
+            fail_count += 1
+        
+        self.progress_var.set(f"完成! 成功: {success_count}, 跳过: {skip_count}, 失败: {fail_count}")
+        self._log(f"\n歌词匹配完成: 成功 {success_count}, 跳过 {skip_count}, 失败 {fail_count}")
+    
+    def _generate_new_filename(self, original_path, artist_name):
+        """生成新的文件名"""
+        path = Path(original_path)
+        stem = path.stem
+        ext = path.suffix
+        
+        # 检查文件名是否已经包含括号中的艺术家
+        import re
+        if re.search(r'\([^)]+\)$', stem):
+            self._log(f"文件名已包含括号标记，跳过: {stem}")
+            return None
+        
+        # 生成新文件名
+        new_stem = f"{stem}({artist_name})"
+        return path.with_name(new_stem + ext)
+
+
+class MappingManagerDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("艺术家映射管理")
+        self.geometry("500x550")
+        self.resizable(True, True)
+        
+        self.style = ttk.Style(self)
+        self.style.theme_use("clam")
+        
+        self._build_ui()
+        self._load_mapping_to_tree()
+        
+        self.transient(parent)
+        self.grab_set()
+    
+    def _build_ui(self):
+        # 列表区域
+        list_frame = ttk.LabelFrame(self, text=" 映射列表 ", padding=10)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.tree = ttk.Treeview(list_frame, columns=("original", "mapped"), show="headings")
+        self.tree.heading("original", text="原名")
+        self.tree.heading("mapped", text="映射名")
+        self.tree.column("original", width=180, minwidth=100)
+        self.tree.column("mapped", width=180, minwidth=100)
+        
+        scrollbar_y = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar_x = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+        
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # 输入区域
+        input_frame = ttk.LabelFrame(self, text=" 添加/编辑映射 ", padding=10)
+        input_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        row1 = ttk.Frame(input_frame)
+        row1.pack(fill=tk.X, pady=5)
+        ttk.Label(row1, text="原名:").pack(side=tk.LEFT, padx=5)
+        self.original_entry = ttk.Entry(row1, width=25)
+        self.original_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Label(row1, text="映射名:").pack(side=tk.LEFT, padx=5)
+        self.mapped_entry = ttk.Entry(row1, width=25)
+        self.mapped_entry.pack(side=tk.LEFT, padx=5)
+        
+        # 按钮区域
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Button(btn_frame, text="➕ 添加", command=self._add_mapping).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="✏ 编辑", command=self._edit_mapping).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="🗑 删除", command=self._delete_mapping).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="🔄 清空", command=self._clear_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="💾 保存", command=self._save_and_close, style="Accent.TButton").pack(side=tk.RIGHT, padx=2)
+    
+    def _load_mapping_to_tree(self):
+        """加载映射到列表"""
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        
+        for original, mapped in self.parent.artist_mapping.items():
+            self.tree.insert("", tk.END, values=(original, mapped))
+    
+    def _add_mapping(self):
+        """添加映射"""
+        original = self.original_entry.get().strip()
+        mapped = self.mapped_entry.get().strip()
+        
+        if not original or not mapped:
+            messagebox.showwarning("警告", "请填写完整的原名和映射名")
+            return
+        
+        if original in self.parent.artist_mapping:
+            if messagebox.askyesno("确认", f"原名 '{original}' 已存在，是否覆盖？"):
+                self.parent.artist_mapping[original] = mapped
+                self._load_mapping_to_tree()
+        else:
+            self.parent.artist_mapping[original] = mapped
+            self._load_mapping_to_tree()
+        
+        self.original_entry.delete(0, tk.END)
+        self.mapped_entry.delete(0, tk.END)
+    
+    def _edit_mapping(self):
+        """编辑映射"""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("警告", "请选择要编辑的映射")
+            return
+        
+        item = selected[0]
+        values = self.tree.item(item, "values")
+        original = values[0]
+        mapped = values[1]
+        
+        self.original_entry.delete(0, tk.END)
+        self.original_entry.insert(0, original)
+        self.mapped_entry.delete(0, tk.END)
+        self.mapped_entry.insert(0, mapped)
+        
+        self.tree.delete(item)
+        del self.parent.artist_mapping[original]
+    
+    def _delete_mapping(self):
+        """删除映射"""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("警告", "请选择要删除的映射")
+            return
+        
+        if messagebox.askyesno("确认", "确定要删除选中的映射吗？"):
+            item = selected[0]
+            values = self.tree.item(item, "values")
+            original = values[0]
+            
+            self.tree.delete(item)
+            if original in self.parent.artist_mapping:
+                del self.parent.artist_mapping[original]
+    
+    def _clear_all(self):
+        """清空所有映射"""
+        if not self.tree.get_children():
+            return
+        
+        if messagebox.askyesno("确认", "确定要清空所有映射吗？"):
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            self.parent.artist_mapping.clear()
+    
+    def _save_and_close(self):
+        """保存并关闭"""
+        self.parent._save_config()
+        self.destroy()
 
 
 if __name__ == "__main__":

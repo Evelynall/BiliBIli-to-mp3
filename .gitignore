@@ -26,4 +26,5 @@ Thumbs.db
 # Project-specific
 download/
 _temp_download/
+歌词/
 *.log

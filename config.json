@@ -22,10 +22,6 @@
       "artist": "思诺Gladys"
     },
     {
-      "keyword": "嘉贝",
-      "artist": "嘉然Diana ; 贝拉Bella"
-    },
-    {
       "keyword": "ASOUL",
       "artist": "贝拉Bella ; 嘉然Diana ; 乃琳Eileen"
     },
@@ -36,7 +32,34 @@
     {
       "keyword": "乃贝",
       "artist": "贝拉Bella ; 乃琳Eileen"
+    },
+    {
+      "keyword": "乃宝",
+      "artist": "乃琳Eileen"
+    },
+    {
+      "keyword": "琳嘉",
+      "artist": "嘉然Diana ; 乃琳Eileen"
+    },
+    {
+      "keyword": "嘉贝",
+      "artist": "贝拉Bella ; 嘉然Diana"
+    },
+    {
+      "keyword": "嘉贝",
+      "artist": "贝拉Bella ; 嘉然Diana"
     }
   ],
-  "auto_extract_booktitle": true
+  "auto_extract_booktitle": true,
+  "artist_mapping": {
+    "贝拉Bella": "贝拉",
+    "嘉然Diana": "嘉然",
+    "乃琳Eileen": "乃琳",
+    "心宜Fiona": "心宜",
+    "思诺Gladys": "思诺",
+    "贝拉Bella ; 嘉然Diana": "嘉贝",
+    "贝拉Bella ; 乃琳Eileen": "乃贝",
+    "嘉然Diana ; 乃琳Eileen": "琳嘉",
+    "心宜Fiona ; 思诺Gladys": "小心思"
+  }
 }

@@ -1090,7 +1090,7 @@ class Application(tk.Tk):
 
         ttk.Checkbutton(
             extract_frame,
-            text="自动提取书名号《》中的内容作为标题和文件名",
+            text="自动提取书名号《》『』【】「」中的内容作为标题和文件名",
             variable=temp_auto_extract
         ).pack(anchor=tk.W)
 
@@ -1255,12 +1255,14 @@ class Application(tk.Tk):
         filename = ""
         artist = ""
 
-        # 1. 提取书名号内容
+        # 1. 提取书名号内容（支持《》、『』、【】、「」）
         if self.auto_extract_booktitle:
             import re
-            matches = re.findall(r'《(.*?)》', raw_title)
+            # 匹配各种中文引号内的内容
+            pattern = r'[《『【「](.*?)[》』】」]'
+            matches = re.findall(pattern, raw_title)
             if matches:
-                processed_title = matches[-1]  # 使用最后一个书名号内容
+                processed_title = matches[-1]  # 使用最后一个引号内容
                 filename = processed_title
 
         # 2. 关键词匹配
