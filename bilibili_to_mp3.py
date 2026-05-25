@@ -62,24 +62,43 @@ def check_ffmpeg():
 # ─── BBDown 检查 ────────────────────────────────────────────
 def check_bbdown():
     """检查 BBDown 是否可用"""
-    # 首先检查当前目录是否有 BBDown.exe
+    return get_bbdown_path() is not None
+
+def get_bbdown_path():
+    """获取可用的 BBDown 路径，优先使用 BBDown-go.exe，其次是 BBDown.exe"""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    bbdown_path = os.path.join(script_dir, "BBDown.exe")
     
-    # 检查文件是否存在
+    # 优先检查 BBDown-go.exe
+    bbdown_go_path = os.path.join(script_dir, "BBDown-go.exe")
+    if os.path.exists(bbdown_go_path):
+        try:
+            result = subprocess.run(
+                [bbdown_go_path, "--help"],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if result.returncode == 0:
+                return bbdown_go_path, "go"
+        except Exception as e:
+            print(f"[DEBUG] BBDown-go.exe 检测失败: {type(e).__name__}: {e}")
+    
+    # 检查 BBDown.exe
+    bbdown_path = os.path.join(script_dir, "BBDown.exe")
     if os.path.exists(bbdown_path):
         try:
-            # 尝试运行 BBDown.exe --help 来检测是否可用
             result = subprocess.run(
                 [bbdown_path, "--help"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
                 timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
-            # BBDown --help 返回 0 表示正常
             if result.returncode == 0:
-                return True
+                return bbdown_path, "original"
         except Exception as e:
             print(f"[DEBUG] BBDown.exe 检测失败: {type(e).__name__}: {e}")
     
@@ -89,15 +108,16 @@ def check_bbdown():
             ["BBDown", "--help"],
             capture_output=True,
             text=True,
+            encoding='utf-8',
             timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         if result.returncode == 0:
-            return True
+            return "BBDown", "original"
     except Exception as e:
         pass
     
-    return False
+    return None, None
 
 
 # ─── 下载与转换核心逻辑 ────────────────────────────────────
@@ -106,7 +126,8 @@ class BiliDownloader:
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_temp_download")
         os.makedirs(self.temp_dir, exist_ok=True)
         self.stop_requested = False
-        self.bbdown_available = check_bbdown()
+        self.bbdown_path, self.bbdown_type = get_bbdown_path()
+        self.bbdown_available = self.bbdown_path is not None
 
     def get_video_info(self, url, stop_callback=None):
         """获取视频信息（标题、封面URL等）"""
@@ -134,7 +155,7 @@ class BiliDownloader:
             }
 
     def download_and_convert_with_bbdown(self, url, output_dir, filename=None, artist="", title="",
-                                         progress_callback=None, log_callback=None, stop_callback=None):
+                                         select_page="", progress_callback=None, log_callback=None, stop_callback=None):
         """使用 BBDown 下载音频、封面，并转换为 MP3"""
         if log_callback is None:
             log_callback = lambda x: None
@@ -152,15 +173,12 @@ class BiliDownloader:
             shutil.rmtree(temp_work_dir)
         os.makedirs(temp_work_dir, exist_ok=True)
 
-        # 确定 BBDown 路径
-        bbdown_cmd = "BBDown"
+        # 确定 BBDown 路径和类型
         if not self.bbdown_available:
             raise RuntimeError("BBDown 不可用")
-        bbdown_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BBDown.exe")
-        if os.path.exists(bbdown_path):
-            bbdown_cmd = bbdown_path
+        bbdown_cmd = self.bbdown_path
         
-        log_callback(f"使用 BBDown: {bbdown_cmd}")
+        log_callback(f"使用 BBDown: {bbdown_cmd} (类型: {self.bbdown_type})")
 
         # 查找 ffmpeg 路径
         ffmpeg_path = "ffmpeg"
@@ -169,6 +187,7 @@ class BiliDownloader:
                 ["where", "ffmpeg"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
             if result.returncode == 0 and result.stdout.strip():
@@ -178,37 +197,82 @@ class BiliDownloader:
         
         log_callback(f"使用 ffmpeg: {ffmpeg_path}")
 
-        # 首先使用 --show-all 获取视频信息（包含标题等）
+        # 获取视频信息（BBDown-go 使用 --only-show-info，原版使用 --show-all）
         log_callback("获取视频信息...")
+        log_callback(f"[DEBUG] BBDown类型: {self.bbdown_type}")
         video_title = ""
         try:
             info_args = [
                 bbdown_cmd,
                 url,
-                "--show-all",
+                "--only-show-info" if self.bbdown_type == "go" else "--show-all",
                 "--work-dir", temp_work_dir,
             ]
+            
+            log_callback(f"[DEBUG] 执行命令: {' '.join(info_args)}")
             
             info_process = subprocess.run(
                 info_args,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 cwd=temp_work_dir,
                 timeout=30,
             )
             
+            log_callback(f"[DEBUG] 命令返回码: {info_process.returncode}")
+            log_callback(f"[DEBUG] stdout 长度: {len(info_process.stdout)} 字符")
+            log_callback(f"[DEBUG] stderr 长度: {len(info_process.stderr)} 字符")
+            
+            # BBDown-go 可能将日志输出到 stderr，合并两者
+            combined_output = info_process.stdout + info_process.stderr
+            
+            # 输出前5行用于调试
+            output_lines = combined_output.splitlines()[:5]
+            if output_lines:
+                log_callback(f"[DEBUG] 合并输出前5行:")
+                for i, line in enumerate(output_lines):
+                    log_callback(f"[DEBUG]  Line {i+1}: {repr(line)}")
+            
             # 从输出中提取视频标题
-            for line in info_process.stdout.splitlines():
+            found_video_title_line = False
+            for line in combined_output.splitlines():
                 if "视频标题" in line:
+                    found_video_title_line = True
+                    log_callback(f"[DEBUG] 找到包含'视频标题'的行: {repr(line)}")
                     import re
-                    match = re.search(r'视频标题[：:]\s*(.*)', line)
+                    # BBDown-go 格式: msg="视频标题: xxx"
+                    # 原版 BBDown 格式: 视频标题: xxx
+                    if self.bbdown_type == "go":
+                        # 匹配 msg="视频标题: xxx" 中的 xxx，去除首尾引号
+                        pattern = r'msg="[^"]*视频标题[：:]\s*([^"]+)"'
+                        match = re.search(pattern, line)
+                        log_callback(f"[DEBUG] 使用正则: {pattern}")
+                    else:
+                        pattern = r'视频标题[：:]\s*(.*)'
+                        match = re.search(pattern, line)
+                        log_callback(f"[DEBUG] 使用正则: {pattern}")
+                    
                     if match:
-                        video_title = match.group(1).strip()
+                        video_title = match.group(1).replace('\n', '').replace('\r', '').strip()
+                        log_callback(f"[DEBUG] 正则匹配成功，提取标题: {repr(video_title)}")
                         log_callback(f"视频标题: {video_title}")
                         break
+                    else:
+                        log_callback(f"[DEBUG] 正则匹配失败，该行无法解析")
+            
+            if not found_video_title_line:
+                log_callback(f"[DEBUG] 未找到包含'视频标题'的行")
+                log_callback(f"[DEBUG] 搜索所有行中是否有相关内容...")
+                for line in combined_output.splitlines()[:20]:
+                    if any(keyword in line for keyword in ["title", "Title", "标题", "TITLE"]):
+                        log_callback(f"[DEBUG] 可能相关的行: {repr(line)}")
+                        
         except Exception as e:
             log_callback(f"获取视频信息失败: {e}")
+            import traceback
+            log_callback(f"[DEBUG] 异常详情: {traceback.format_exc()}")
 
         # 确定文件名
         if not filename and video_title:
@@ -232,6 +296,12 @@ class BiliDownloader:
                 "--work-dir", temp_work_dir,
                 "--ffmpeg-path", ffmpeg_path,
             ]
+            
+            # 添加分P参数
+            if select_page:
+                args.append("-p")
+                args.append(select_page)
+                log_callback(f"指定分P: {select_page}")
 
             log_callback(f"启动 BBDown 进程下载音频...")
             process = subprocess.Popen(
@@ -239,6 +309,7 @@ class BiliDownloader:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding='utf-8',
                 bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 cwd=temp_work_dir,
@@ -304,6 +375,7 @@ class BiliDownloader:
                 cover_args,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 cwd=temp_work_dir,
                 timeout=30,
@@ -404,7 +476,7 @@ class BiliDownloader:
             self._cleanup_temp()
 
     def download_and_convert(self, url, output_dir, filename=None, artist="", title="",
-                              progress_callback=None, log_callback=None, stop_callback=None):
+                              select_page="", progress_callback=None, log_callback=None, stop_callback=None):
         """
         下载视频并转换为MP3（优先使用 BBDown）
         返回: (mp3_path, cover_path) 或抛出异常
@@ -421,6 +493,7 @@ class BiliDownloader:
             try:
                 return self.download_and_convert_with_bbdown(
                     url, output_dir, filename=filename, artist=artist, title=title,
+                    select_page=select_page,
                     progress_callback=progress_callback, log_callback=log_callback,
                     stop_callback=stop_callback
                 )
@@ -603,10 +676,14 @@ class BiliDownloader:
 
     def _sanitize_filename(self, name):
         """清理文件名中的非法字符"""
+        if not name:
+            return "video"
+        name = name.replace('\n', '').replace('\r', '')
         invalid_chars = r'<>:"/\|?*'
         for ch in invalid_chars:
             name = name.replace(ch, "_")
-        return name.strip()[:200]
+        name = name.strip()
+        return name if name else "video"
 
     def _cleanup_temp(self):
         """清理临时下载目录"""
@@ -685,25 +762,30 @@ class Application(tk.Tk):
     def _check_environment(self):
         # 检查 BBDown
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        bbdown_go_path = os.path.join(script_dir, "BBDown-go.exe")
         bbdown_path = os.path.join(script_dir, "BBDown.exe")
         
         self.log_text.configure(state=tk.NORMAL)
         
+        if os.path.exists(bbdown_go_path):
+            self.log_text.insert(tk.END, f"[✓] 找到 BBDown-go.exe: {bbdown_go_path}\n")
         if os.path.exists(bbdown_path):
             self.log_text.insert(tk.END, f"[✓] 找到 BBDown.exe: {bbdown_path}\n")
-        else:
-            self.log_text.insert(tk.END, f"[!] 未找到 BBDown.exe，程序目录: {script_dir}\n")
         
-        if check_bbdown():
-            self.log_text.insert(tk.END, "[✓] BBDown 检测成功，将优先使用 BBDown 下载。\n")
+        if self.downloader.bbdown_available:
+            bbdown_type = "BBDown-go" if self.downloader.bbdown_type == "go" else "BBDown"
+            self.log_text.insert(tk.END, f"[✓] {bbdown_type} 检测成功，将优先使用 {bbdown_type} 下载。\n")
         else:
             self.log_text.insert(tk.END, "[!] 未检测到可用的 BBDown，将使用 yt-dlp 下载。\n")
-            self.log_text.insert(tk.END, "[!] 如需使用 BBDown，请从 https://github.com/nilaoda/BBDown/releases 下载并放置在程序目录中。\n")
+            self.log_text.insert(tk.END, "[!] 如需使用 BBDown，请下载 BBDown-go.exe 或 BBDown.exe 并放置在程序目录中。\n")
+            self.log_text.insert(tk.END, "[!] BBDown-go: https://github.com/nilaoda/BBDown-go\n")
+            self.log_text.insert(tk.END, "[!] BBDown: https://github.com/nilaoda/BBDown\n")
         
         if not check_ffmpeg():
             self.log_text.insert(tk.END, "[!] 警告: 未检测到 ffmpeg，音频转换将无法进行。\n")
             self.log_text.insert(tk.END, "[!] 请安装 ffmpeg 并确保其在系统 PATH 中。\n")
             self.log_text.insert(tk.END, "[!] 下载地址: https://ffmpeg.org/download.html\n\n")
+
             messagebox.showwarning(
                 "缺少 ffmpeg",
                 "未检测到 ffmpeg！\n\n"
@@ -752,17 +834,19 @@ class Application(tk.Tk):
         tree_container.pack(fill=tk.BOTH, expand=True)
 
         # Treeview
-        columns = ("status", "url", "artist", "title", "filename")
+        columns = ("status", "url", "select_page", "artist", "title", "filename")
         self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="extended")
 
         self.tree.heading("status", text="状态")
         self.tree.heading("url", text="B站链接")
+        self.tree.heading("select_page", text="分P (如: 1,3-5)")
         self.tree.heading("artist", text="艺术家 (元数据)")
         self.tree.heading("title", text="标题 (元数据)")
         self.tree.heading("filename", text="文件名")
 
         self.tree.column("status", width=70, minwidth=60, anchor=tk.CENTER)
         self.tree.column("url", width=280, minwidth=150)
+        self.tree.column("select_page", width=100, minwidth=60, anchor=tk.CENTER)
         self.tree.column("artist", width=130, minwidth=80)
         self.tree.column("title", width=180, minwidth=100)
         self.tree.column("filename", width=180, minwidth=100)
@@ -885,7 +969,7 @@ class Application(tk.Tk):
 
         # 获取列索引
         col_idx = int(column.replace("#", "")) - 1
-        col_names = ["status", "url", "artist", "title", "filename"]
+        col_names = ["status", "url", "select_page", "artist", "title", "filename"]
 
         # 状态列不可编辑
         if col_idx == 0:
@@ -897,6 +981,7 @@ class Application(tk.Tk):
         # 弹出编辑对话框
         labels = {
             "url": "B站链接",
+            "select_page": "分P（如: 1,3-5，留空则下载全部）",
             "artist": "艺术家（写入MP3元数据）",
             "title": "标题（写入MP3元数据）",
             "filename": "文件名（不含扩展名，留空则使用视频标题）",
@@ -1008,9 +1093,10 @@ class Application(tk.Tk):
 
             values = self.tree.item(task_id, "values")
             url = values[1]
-            artist = values[2]
-            title = values[3]
-            filename = values[4]
+            select_page = values[2] if len(values) > 2 else ""
+            artist = values[3] if len(values) > 3 else ""
+            title = values[4] if len(values) > 4 else ""
+            filename = values[5] if len(values) > 5 else ""
 
             self.after(0, self._update_tree_status, task_id, "⬇ 下载中...")
             self.after(0, self.progress_var.set, f"正在处理 ({i + 1}/{total}): {url[:40]}...")
@@ -1023,6 +1109,7 @@ class Application(tk.Tk):
                     filename=filename if filename else None,
                     artist=artist,
                     title=title,
+                    select_page=select_page if select_page else "",
                     progress_callback=lambda msg, tid=task_id: self.after(
                         0, self._update_tree_status, tid, msg
                     ),
@@ -1208,21 +1295,24 @@ class Application(tk.Tk):
     def _extract_video_info(self, url):
         """使用 BBDown 提取视频信息（标题等）"""
         try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            bbdown_cmd = "BBDown"
-            bbdown_path = os.path.join(script_dir, "BBDown.exe")
-            if os.path.exists(bbdown_path):
-                bbdown_cmd = bbdown_path
+            # 使用 downloader 中的 bbdown_path 和 bbdown_type
+            bbdown_cmd = self.downloader.bbdown_path
+            bbdown_type = self.downloader.bbdown_type
+
+            if not bbdown_cmd:
+                return None
 
             temp_dir = os.path.join(self.default_output_dir, "temp_info")
             os.makedirs(temp_dir, exist_ok=True)
 
-            # 使用 BBDown --show-all 获取视频信息
-            args = [bbdown_cmd, url, "--show-all", "--work-dir", temp_dir]
+            # BBDown-go 使用 --only-show-info，原版使用 --show-all
+            info_param = "--only-show-info" if bbdown_type == "go" else "--show-all"
+            args = [bbdown_cmd, url, info_param, "--work-dir", temp_dir]
             result = subprocess.run(
                 args,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 cwd=temp_dir,
                 timeout=30
@@ -1235,22 +1325,67 @@ class Application(tk.Tk):
             except:
                 pass
 
+            print(f"[DEBUG _extract_video_info] BBDown类型: {bbdown_type}")
+            print(f"[DEBUG _extract_video_info] 命令返回码: {result.returncode}")
+            print(f"[DEBUG _extract_video_info] stdout 长度: {len(result.stdout)} 字符")
+            print(f"[DEBUG _extract_video_info] stderr 长度: {len(result.stderr)} 字符")
+            
+            # BBDown-go 可能将日志输出到 stderr，合并两者
+            combined_output = result.stdout + result.stderr
+            
+            # 输出前10行用于调试
+            output_lines = combined_output.splitlines()[:10]
+            if output_lines:
+                print(f"[DEBUG _extract_video_info] 合并输出前10行:")
+                for i, line in enumerate(output_lines):
+                    print(f"[DEBUG _extract_video_info]  Line {i+1}: {repr(line)}")
+
             video_title = ""
             if result.returncode == 0:
                 import re
-                for line in result.stdout.splitlines():
+                found_video_title_line = False
+                for line in combined_output.splitlines():
                     if "视频标题" in line:
-                        match = re.search(r'视频标题[：:]\s*(.*)', line)
+                        found_video_title_line = True
+                        print(f"[DEBUG _extract_video_info] 找到包含'视频标题'的行: {repr(line)}")
+                        # BBDown-go 格式: msg="视频标题: xxx"
+                        # 原版 BBDown 格式: 视频标题: xxx
+                        if bbdown_type == "go":
+                            pattern = r'msg="[^"]*视频标题[：:]\s*([^"]+)"'
+                            match = re.search(pattern, line)
+                            print(f"[DEBUG _extract_video_info] 使用正则: {pattern}")
+                        else:
+                            pattern = r'视频标题[：:]\s*(.*)'
+                            match = re.search(pattern, line)
+                            print(f"[DEBUG _extract_video_info] 使用正则: {pattern}")
+                        
                         if match:
                             video_title = match.group(1).strip()
+                            print(f"[DEBUG _extract_video_info] 正则匹配成功，提取标题: {repr(video_title)}")
                             break
+                        else:
+                            print(f"[DEBUG _extract_video_info] 正则匹配失败，该行无法解析")
+                
+                if not found_video_title_line:
+                    print(f"[DEBUG _extract_video_info] 未找到包含'视频标题'的行")
+                    print(f"[DEBUG _extract_video_info] 搜索所有行中是否有相关内容...")
+                    for line in combined_output.splitlines()[:20]:
+                        if any(keyword in line for keyword in ["title", "Title", "标题", "TITLE"]):
+                            print(f"[DEBUG _extract_video_info] 可能相关的行: {repr(line)}")
 
+            print(f"[DEBUG _extract_video_info] 最终提取的标题: {repr(video_title)}")
             return {"title": video_title} if video_title else None
         except Exception as e:
+            print(f"[DEBUG _extract_video_info] 异常: {e}")
+            import traceback
+            print(f"[DEBUG _extract_video_info] 异常详情: {traceback.format_exc()}")
             return None
 
     def _process_title(self, raw_title):
         """处理标题：提取书名号、匹配关键词"""
+        if not raw_title:
+            raw_title = ""
+        raw_title = raw_title.replace('\n', '').replace('\r', '').strip()
         processed_title = raw_title
         filename = ""
         artist = ""
@@ -1278,7 +1413,7 @@ class Application(tk.Tk):
         }
 
     # 修改添加任务方法，添加自动获取视频信息
-    def _add_task(self, url="", artist="", title="", filename="", auto_fetch=True):
+    def _add_task(self, url="", select_page="1", artist="", title="", filename="", auto_fetch=True):
         """添加一个下载任务"""
         if not url:
             url = self._simple_input_dialog("添加B站链接", "请输入B站视频链接:")
@@ -1298,7 +1433,7 @@ class Application(tk.Tk):
         item_id = None
         if auto_fetch and self.downloader.bbdown_available:
             # 先添加等待状态的任务
-            item_id = self.tree.insert("", tk.END, values=("🔍 获取信息中...", url, artist, title, filename))
+            item_id = self.tree.insert("", tk.END, values=("🔍 获取信息中...", url, select_page, artist, title, filename))
             self.tree.see(item_id)
 
             # 在后台线程中获取视频信息
@@ -1314,6 +1449,7 @@ class Application(tk.Tk):
                     self.after(0, lambda: self.tree.item(item_id, values=(
                         "⏳ 等待",
                         url,
+                        select_page,
                         final_artist,
                         final_title,
                         final_filename
@@ -1324,7 +1460,7 @@ class Application(tk.Tk):
             thread = threading.Thread(target=fetch_info, daemon=True)
             thread.start()
         else:
-            item_id = self.tree.insert("", tk.END, values=("⏳ 等待", url, artist, title, filename))
+            item_id = self.tree.insert("", tk.END, values=("⏳ 等待", url, select_page, artist, title, filename))
             self.tree.see(item_id)
 
         return item_id

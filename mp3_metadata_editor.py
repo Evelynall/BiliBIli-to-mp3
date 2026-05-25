@@ -13,6 +13,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import requests
+import threading
+from queue import Queue
 
 REQUIRED_MODULES = {
     "mutagen": "mutagen",
@@ -209,6 +211,8 @@ class MP3MetadataEditor(tk.Tk):
 
         ttk.Button(action_btn_frame, text="🔀 LYRICS转USLT",
                    command=self._transfer_lyrics).pack(side=tk.LEFT, padx=2)
+        ttk.Button(action_btn_frame, text="📄 格式化歌词",
+                   command=self._format_lyrics).pack(side=tk.LEFT, padx=2)
 
         self.progress_var = tk.StringVar(value="就绪")
         ttk.Label(action_btn_frame, textvariable=self.progress_var,
@@ -689,10 +693,10 @@ class MP3MetadataEditor(tk.Tk):
         return self.artist_mapping.get(artist_name, artist_name)
 
     def _extract_song_name(self, filename):
-        """从文件名中提取歌曲名（取"-"前面的部分）"""
+        """从文件名中提取歌曲名（取最后一个"-"前面的部分）"""
         stem = Path(filename).stem
         if "-" in stem:
-            return stem.split("-")[0].strip()
+            return stem.rsplit("-", 1)[0].strip()
         return stem.strip()
     
     def _search_lyrics_from_netease(self, song_name):
@@ -779,7 +783,6 @@ class MP3MetadataEditor(tk.Tk):
             messagebox.showwarning("警告", "请先导入音乐文件")
             return
         
-        # 如果没有设置歌词目录，使用当前脚本所在目录下的歌词文件夹
         lrc_dir = getattr(self, 'lrc_dir', None)
         if not lrc_dir:
             lrc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '歌词')
@@ -787,6 +790,268 @@ class MP3MetadataEditor(tk.Tk):
                 os.makedirs(lrc_dir)
             self.lrc_dir = lrc_dir
             self._log(f"歌词目录已设置为: {lrc_dir}")
+        
+        items = self.tree.selection()
+        if not items:
+            if messagebox.askyesno("提示", "未选择文件，是否处理所有文件？"):
+                items = self.tree.get_children()
+            else:
+                return
+        
+        if not items:
+            messagebox.showinfo("提示", "没有可处理的文件")
+            return
+        
+        self._log("=" * 40)
+        self._log("开始自动匹配歌词...")
+        self.progress_var.set("正在下载歌词...")
+        self.update_idletasks()
+        
+        tasks_to_process = []
+        for item in items:
+            idx = self.tree.index(item)
+            if idx >= len(self.mp3_files):
+                continue
+            mp3_path = self.mp3_files[idx]
+            base_name = self._get_base_name(mp3_path)
+            song_name = self._extract_song_name(mp3_path)
+            lrc_path = os.path.join(lrc_dir, base_name + ".lrc")
+            
+            if os.path.exists(lrc_path):
+                self._log(f"跳过（歌词已存在）: {base_name}")
+                continue
+            
+            tasks_to_process.append({
+                'item': item,
+                'idx': idx,
+                'base_name': base_name,
+                'song_name': song_name,
+                'lrc_path': lrc_path
+            })
+        
+        if not tasks_to_process:
+            self._log("没有需要处理的歌曲")
+            self.progress_var.set("完成！")
+            return
+        
+        self._log(f"共 {len(tasks_to_process)} 个任务需要处理")
+        
+        self.lyrics_queue = Queue()
+        self.lyrics_results = {}
+        
+        def download_worker(task):
+            base_name = task['base_name']
+            song_name = task['song_name']
+            lrc_path = task['lrc_path']
+            item = task['item']
+            idx = task['idx']
+            
+            self.lyrics_queue.put({
+                'type': 'log',
+                'item': item,
+                'idx': idx,
+                'base_name': base_name,
+                'message': f"搜索歌词: {song_name}",
+                'final': False
+            })
+            
+            lrc_url = self._search_lyrics_from_gecimi(song_name)
+            if lrc_url:
+                if self._download_lyrics(lrc_url, lrc_path):
+                    self.lyrics_queue.put({
+                        'type': 'log',
+                        'item': item,
+                        'idx': idx,
+                        'base_name': base_name,
+                        'message': f"  ✓ 歌词已保存(gecimi): {base_name}.lrc",
+                        'success': True,
+                        'final': True
+                    })
+                    return
+            
+            self.lyrics_queue.put({
+                'type': 'log',
+                'item': item,
+                'idx': idx,
+                'base_name': base_name,
+                'message': f"  gecimi 失败，尝试网易云音乐...",
+                'final': False
+            })
+            
+            lyric_content = self._search_lyrics_from_netease(song_name)
+            if lyric_content:
+                if self._download_lyrics(lyric_content, lrc_path, is_content=True):
+                    self.lyrics_queue.put({
+                        'type': 'log',
+                        'item': item,
+                        'idx': idx,
+                        'base_name': base_name,
+                        'message': f"  ✓ 歌词已保存(网易云): {base_name}.lrc",
+                        'success': True,
+                        'final': True
+                    })
+                    return
+            
+            self.lyrics_queue.put({
+                'type': 'log',
+                'item': item,
+                'idx': idx,
+                'base_name': base_name,
+                'message': f"  ✗ 未找到歌词",
+                'success': False,
+                'final': True
+            })
+        
+        def process_queue():
+            processed = 0
+            total = len(tasks_to_process)
+            
+            while processed < total:
+                try:
+                    result = self.lyrics_queue.get_nowait()
+                    
+                    if result['type'] == 'log':
+                        self._log(result['message'])
+                        
+                        if result.get('final', False):
+                            if result.get('success', False):
+                                values = list(self.tree.item(result['item'], "values"))
+                                values[5] = f"{result['base_name']}.lrc"
+                                self.tree.item(result['item'], values=values)
+                            
+                            self.lyrics_results[result['idx']] = result
+                            processed += 1
+                        
+                        self.progress_var.set(f"正在下载歌词... ({processed}/{total})")
+                    
+                except:
+                    pass
+                
+                self.after(100, process_queue)
+                return
+            
+            self._finish_lyrics_download()
+        
+        for task in tasks_to_process:
+            t = threading.Thread(target=download_worker, args=(task,))
+            t.daemon = True
+            t.start()
+        
+        self.after(100, process_queue)
+    
+    def _finish_lyrics_download(self):
+        """完成歌词下载后更新状态"""
+        success_count = sum(1 for r in self.lyrics_results.values() if r['success'])
+        fail_count = sum(1 for r in self.lyrics_results.values() if not r['success'] and not r['skip'])
+        
+        self.progress_var.set(f"完成! 成功: {success_count}, 跳过: 0, 失败: {fail_count}")
+        self._log(f"\n歌词匹配完成: 成功 {success_count}, 跳过 0, 失败 {fail_count}")
+        self._log("=" * 40)
+    
+    def _generate_new_filename(self, original_path, artist_name):
+        """生成新的文件名"""
+        path = Path(original_path)
+        stem = path.stem
+        ext = path.suffix
+        
+        # 检查文件名是否已经包含括号中的艺术家
+        import re
+        if re.search(r'\([^)]+\)$', stem):
+            self._log(f"文件名已包含括号标记，跳过: {stem}")
+            return None
+        
+        # 生成新文件名
+        new_stem = f"{stem}({artist_name})"
+        return path.with_name(new_stem + ext)
+
+    def _parse_filename_info(self, filename):
+        """从文件名中提取歌曲名和原唱，格式：{歌曲名}-{原唱}(其他内容)"""
+        stem = Path(filename).stem
+        song_name = ""
+        original_singer = ""
+        
+        if "-" in stem:
+            parts = stem.rsplit("-", 1)
+            song_name = parts[0].strip()
+            
+            second_part = parts[1].strip()
+            if "(" in second_part:
+                end_idx = second_part.find("(")
+                original_singer = second_part[:end_idx].strip()
+            else:
+                original_singer = second_part
+        
+        return song_name, original_singer
+
+    def _extract_first_lyric_time(self, lyrics_content):
+        """提取第一句歌词的时间戳"""
+        import re
+        lines = lyrics_content.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith('[') and ']' in line:
+                time_match = re.match(r'\[(\d{2}):(\d{2})\.(\d{2,3})\]', line)
+                if time_match:
+                    minutes = int(time_match.group(1))
+                    seconds = int(time_match.group(2))
+                    milliseconds = int(time_match.group(3))
+                    return minutes * 60 + seconds + milliseconds / 1000.0
+        
+        return None
+
+    def _subtract_seconds_from_time(self, total_seconds, subtract_seconds=3):
+        """从时间戳中减去指定秒数，返回格式化的时间字符串"""
+        new_seconds = max(0, total_seconds - subtract_seconds)
+        
+        minutes = int(new_seconds // 60)
+        seconds = int(new_seconds % 60)
+        milliseconds = int((new_seconds - int(new_seconds)) * 100)
+        
+        return f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
+
+    def _get_lyrics_from_metadata(self, mp3_path):
+        """从MP3元数据中读取歌词"""
+        try:
+            audio = MP3(mp3_path)
+            tags = audio.tags
+            
+            for key in tags.keys():
+                if key.startswith("USLT"):
+                    return str(tags[key].text)
+                elif key.startswith("SYLT"):
+                    return self._extract_lyrics_from_frame(tags[key])
+            return None
+        except Exception as e:
+            self._log(f"从元数据读取歌词失败 {mp3_path}: {e}")
+            return None
+
+    def _write_lyrics_to_metadata(self, mp3_path, lyrics_content):
+        """将歌词写入MP3元数据"""
+        try:
+            audio = MP3(mp3_path)
+            try:
+                tags = audio.tags
+            except:
+                audio.add_tags()
+                tags = audio.tags
+            
+            tags.delall("USLT")
+            tags.add(USLT(
+                encoding=3,
+                lang='eng',
+                desc='',
+                text=lyrics_content
+            ))
+            audio.save()
+            return True
+        except Exception as e:
+            self._log(f"写入歌词到元数据失败 {mp3_path}: {e}")
+            return False
+
+    def _format_lyrics(self):
+        """格式化歌词文件，添加基础信息，支持歌词文件和元数据"""
+        lrc_dir = getattr(self, 'lrc_dir', None)
         
         items = self.tree.selection()
         if not items:
@@ -810,64 +1075,81 @@ class MP3MetadataEditor(tk.Tk):
             
             mp3_path = self.mp3_files[idx]
             base_name = self._get_base_name(mp3_path)
-            song_name = self._extract_song_name(mp3_path)
+            lrc_path = os.path.join(lrc_dir, base_name + ".lrc") if lrc_dir else None
             
-            # 检查是否已存在歌词文件
-            lrc_path = os.path.join(lrc_dir, base_name + ".lrc")
-            if os.path.exists(lrc_path):
-                self._log(f"跳过（歌词已存在）: {base_name}")
+            content = None
+            
+            if lrc_path and os.path.exists(lrc_path):
+                with open(lrc_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            else:
+                content = self._get_lyrics_from_metadata(mp3_path)
+            
+            if not content:
+                self._log(f"跳过（无歌词内容）: {base_name}")
                 skip_count += 1
                 continue
             
-            self._log(f"搜索歌词: {song_name}")
-            
-            # 首先尝试 gecimi API
-            lrc_url = self._search_lyrics_from_gecimi(song_name)
-            if lrc_url:
-                if self._download_lyrics(lrc_url, lrc_path):
-                    self._log(f"  ✓ 歌词已保存(gecimi): {base_name}.lrc")
-                    success_count += 1
-                    # 更新树视图
-                    values = list(self.tree.item(item, "values"))
-                    values[5] = f"{base_name}.lrc"
-                    self.tree.item(item, values=values)
-                    continue
-            
-            # gecimi 失败，尝试网易云音乐
-            self._log(f"  gecimi 失败，尝试网易云音乐...")
-            lyric_content = self._search_lyrics_from_netease(song_name)
-            if lyric_content:
-                if self._download_lyrics(lyric_content, lrc_path, is_content=True):
-                    self._log(f"  ✓ 歌词已保存(网易云): {base_name}.lrc")
-                    success_count += 1
-                    # 更新树视图
-                    values = list(self.tree.item(item, "values"))
-                    values[5] = f"{base_name}.lrc"
-                    self.tree.item(item, values=values)
-                    continue
-            
-            # 都失败了
-            self._log(f"  ✗ 未找到歌词")
-            fail_count += 1
+            try:
+                song_name, original_singer = self._parse_filename_info(mp3_path)
+                artist = self._get_artist_from_metadata(mp3_path) or "未知"
+                
+                lines = content.split('\n')
+                first_line = lines[0] if lines else ""
+                remaining_lines = lines[1:] if len(lines) > 1 else []
+                
+                first_lyric_time = self._extract_first_lyric_time(content)
+                
+                formatted_lines = []
+                
+                if first_line.startswith('[by:') and ']' in first_line:
+                    formatted_lines.append(first_line)
+                    formatted_lines.append("[offset:500]")
+                else:
+                    formatted_lines.append("[offset:500]")
+                    if first_line:
+                        remaining_lines.insert(0, first_line)
+                
+                formatted_lines.append("")
+                formatted_lines.append(f"[00:00.00] {song_name} - {original_singer}" if song_name else "")
+                
+                if first_lyric_time is not None and first_lyric_time < 2.0:
+                    formatted_lines.append(f"[00:00.00] 翻唱：{artist}")
+                else:
+                    formatted_lines.append(f"[00:02.00] 翻唱：{artist}")
+                
+                formatted_lines.append("[00:04.00]")
+                formatted_lines.append("")
+                
+                if first_lyric_time is not None:
+                    dotted_time = self._subtract_seconds_from_time(first_lyric_time)
+                    formatted_lines.append(f"[{dotted_time}]...")
+                    formatted_lines.append("")
+                
+                formatted_lines.extend(remaining_lines)
+                
+                new_content = '\n'.join(formatted_lines)
+                
+                if lrc_path and os.path.exists(lrc_path):
+                    with open(lrc_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                    self._log(f"✓ 歌词文件格式化完成: {base_name}.lrc")
+                else:
+                    if self._write_lyrics_to_metadata(mp3_path, new_content):
+                        self._log(f"✓ 元数据歌词格式化完成: {base_name}")
+                    else:
+                        self._log(f"✗ 写入元数据失败: {base_name}")
+                        fail_count += 1
+                        continue
+                
+                success_count += 1
+                
+            except Exception as e:
+                self._log(f"✗ 歌词格式化失败 {base_name}: {e}")
+                fail_count += 1
         
         self.progress_var.set(f"完成! 成功: {success_count}, 跳过: {skip_count}, 失败: {fail_count}")
-        self._log(f"\n歌词匹配完成: 成功 {success_count}, 跳过 {skip_count}, 失败 {fail_count}")
-    
-    def _generate_new_filename(self, original_path, artist_name):
-        """生成新的文件名"""
-        path = Path(original_path)
-        stem = path.stem
-        ext = path.suffix
-        
-        # 检查文件名是否已经包含括号中的艺术家
-        import re
-        if re.search(r'\([^)]+\)$', stem):
-            self._log(f"文件名已包含括号标记，跳过: {stem}")
-            return None
-        
-        # 生成新文件名
-        new_stem = f"{stem}({artist_name})"
-        return path.with_name(new_stem + ext)
+        self._log(f"\n歌词格式化完成: 成功 {success_count}, 跳过 {skip_count}, 失败 {fail_count}")
 
 
 class MappingManagerDialog(tk.Toplevel):
